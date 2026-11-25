@@ -100,18 +100,18 @@ jobs:
           cd $GITHUB_WORKSPACE/device_kernel
           DC=arch/arm64/configs/merlin_defconfig
 
+          echo "[+] MiCode stock is GAS-native asm (named .macro args, GNU-as macro syntax) that clang's integrated assembler rejects (vdso gettimeofday.S 'too many positional arguments'). Keep '-no-integrated-as' and give clang the REAL aarch64 cross-assembler so every target .S assembles with GNU as. Without the package clang falls back to host /usr/bin/as, which rejects the ARM '-EL' flag (scripts/mod/empty.o + vdso both died on that)."
+          sudo apt-get install -y -q binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi >/dev/null 2>&1 || sudo apt-get install -y binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi
+          echo -n "[+] aarch64 as -> "; which aarch64-linux-gnu-as && aarch64-linux-gnu-as --version | head -1
+          echo -n "[+] arm32  as -> "; which arm-linux-gnueabi-as || echo "(missing — compat vdso may need it)"
+
           echo "[+] MiCode stock + clang: remove -fuse-ld=lld from KBUILD_CFLAGS (makes every cc-option -Werror probe fail with 'argument unused during compilation' -> breaks stackprotector + feature detection). Link still uses LD=ld.lld from the make cmd."
           sed -i '/KBUILD_CFLAGS[[:space:]]*+=[[:space:]]*-fuse-ld=lld/d' Makefile || true
           echo "[+] also disable stackprotector (belt-and-suspenders for prepare-compiler-check)"
           sed -i '/^CONFIG_CC_STACKPROTECTOR_STRONG=y/d; /^CONFIG_CC_STACKPROTECTOR_REGULAR=y/d; /^CONFIG_CC_STACKPROTECTOR_AUTO=y/d' "$DC" || true
           echo 'CONFIG_CC_STACKPROTECTOR_NONE=y' >> "$DC"
 
-          echo "[+] MiCode stock + clang: use the integrated assembler (remove 'CLANG_FLAGS += -no-integrated-as'; the external /usr/bin/as is host-x86 and rejects the ARM '-EL' flag)"
-          sed -i '/CLANG_FLAGS[[:space:]]*+=[[:space:]]*-no-integrated-as/d' Makefile || true
-
-          echo "[+] vdso + clang IAS: collapse backslash-newline line-continuations in the vdso .S files (Python helper, no shell/YAML backslash-escaping ambiguity). GAS splices a trailing-'\\'+newline inside a .macro parameter list; clang IAS does NOT, so get_ts_realtime (res_sec, res_nsec, \\ <nl> clock_nsec...) parses as a 2-param macro and the 6-arg calls fail 'too many positional arguments' (gettimeofday.S:223/246/267). Joining trailing-'\\' lines is identity for GAS and fixes clang; '\\res'/'\\fail' param refs (backslash+letter, mid-line) are untouched."
-          python3 $GITHUB_WORKSPACE/fix_vdso_clang_ias.py "arch/arm64/kernel/vdso/*.S" || echo "[!] vdso IAS join skipped"
-          grep -n 'macro.*get_ts_realtime' arch/arm64/kernel/vdso/gettimeofday.S | head -2 || true
+          echo "[+] KEEP the kernel's 'CLANG_FLAGS += -no-integrated-as' (do NOT remove it). With the aarch64 binutils installed above, clang --target=aarch64-linux-gnu now dispatches .S files to aarch64-linux-gnu-as (GNU as), which assembles the GAS-syntax vdso (named .macro args) and everything else. The earlier 'switch to IAS' approach hit 'too many positional arguments' because clang IAS does not accept these named-arg macros."
 
           echo "[+] keep SUS_MAP off (old show_smap(...,is_pid) signature on 4.14 MTK)"
           sed -i '/^CONFIG_KSU_SUSFS_SUS_MAP=y/d' "$DC" || true
