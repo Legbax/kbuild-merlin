@@ -9,7 +9,7 @@ env:
   DEVICE_CODENAME: "merlin"
 
   CUSTOM_CMDS: "CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- CROSS_COMPILE_COMPAT=arm-linux-gnueabi-"
-  EXTRA_CMDS: "CLANG_TRIPLE=aarch64-linux-gnu- LLVM=1 LLVM_IAS=1 CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip READELF=llvm-readelf HOSTCC=clang HOSTCXX=clang++"
+  EXTRA_CMDS: "CLANG_TRIPLE=aarch64-linux-gnu- LLVM=1 LLVM_IAS=0 CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip READELF=llvm-readelf HOSTCC=clang HOSTCXX=clang++"
 
   # merlin MIUI STOCK kernel source (official Xiaomi MiCode, 4.14.186) — LOS tree bootloops on MIUI 13, this one matches the vendor
   KERNEL_SOURCE: "https://github.com/MiCode/Xiaomi_Kernel_OpenSource"
@@ -111,7 +111,14 @@ jobs:
           sed -i '/^CONFIG_CC_STACKPROTECTOR_STRONG=y/d; /^CONFIG_CC_STACKPROTECTOR_REGULAR=y/d; /^CONFIG_CC_STACKPROTECTOR_AUTO=y/d' "$DC" || true
           echo 'CONFIG_CC_STACKPROTECTOR_NONE=y' >> "$DC"
 
-          echo "[+] KEEP the kernel's 'CLANG_FLAGS += -no-integrated-as' (do NOT remove it). With the aarch64 binutils installed above, clang --target=aarch64-linux-gnu now dispatches .S files to aarch64-linux-gnu-as (GNU as), which assembles the GAS-syntax vdso (named .macro args) and everything else. The earlier 'switch to IAS' approach hit 'too many positional arguments' because clang IAS does not accept these named-arg macros."
+          echo "[+] KEEP the kernel's 'CLANG_FLAGS += -no-integrated-as' (external GNU as; the stock vdso uses named .macro args that clang IAS rejects). Run 2 proved clang still invoked the HOST /usr/bin/as (->-EL error) because the kernel's gcc-toolchain auto-detection did NOT set --prefix for clang. FORCE it: inject '--prefix=/usr/bin/aarch64-linux-gnu-' into CLANG_FLAGS right after the -no-integrated-as line, so clang's external assembler is /usr/bin/aarch64-linux-gnu-as (binutils 2.42, installed above). LLVM_IAS=0 (env) removes the contradictory -integrated-as flag."
+          if grep -qE 'CLANG_FLAGS[[:space:]]*\+=[[:space:]]*-no-integrated-as' Makefile; then
+            sed -i '/CLANG_FLAGS[[:space:]]*+=[[:space:]]*-no-integrated-as/a CLANG_FLAGS += --prefix=/usr/bin/aarch64-linux-gnu-' Makefile
+            echo "[+] injected --prefix into CLANG_FLAGS:"; grep -nE 'CLANG_FLAGS.*(-no-integrated-as|--prefix)' Makefile | head -6
+          else
+            echo "[!] '-no-integrated-as' line not found — appending CLANG_FLAGS at EOF (deferred-expansion fallback)"
+            printf '\nCLANG_FLAGS += -no-integrated-as\nCLANG_FLAGS += --prefix=/usr/bin/aarch64-linux-gnu-\n' >> Makefile
+          fi
 
           echo "[+] keep SUS_MAP off (old show_smap(...,is_pid) signature on 4.14 MTK)"
           sed -i '/^CONFIG_KSU_SUSFS_SUS_MAP=y/d' "$DC" || true
