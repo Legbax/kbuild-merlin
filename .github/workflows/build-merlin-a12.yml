@@ -1,0 +1,162 @@
+name: Build Redmi Note 9 (merlin / MIUI A12) KernelSU + SUSFS
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+env:
+  DEVICE_NAME: "redmi_note_9"
+  DEVICE_CODENAME: "merlin"
+
+  CUSTOM_CMDS: "CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- CROSS_COMPILE_COMPAT=arm-linux-gnueabi-"
+  EXTRA_CMDS: "CLANG_TRIPLE=aarch64-linux-gnu- LLVM=1 LLVM_IAS=1 CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip READELF=llvm-readelf HOSTCC=clang HOSTCXX=clang++"
+
+  # merlin MIUI STOCK kernel source (official Xiaomi MiCode, 4.14.186) — LOS tree bootloops on MIUI 13, this one matches the vendor
+  KERNEL_SOURCE: "https://github.com/MiCode/Xiaomi_Kernel_OpenSource"
+  KERNEL_BRANCH: "merlin-r-oss"
+
+  CLANG_SOURCE: "https://raw.githubusercontent.com/Neutron-Toolchains/antman/main/antman"
+  CLANG_BRANCH: ""
+  GCC_GNU: true
+  GCC_64_SOURCE: ""
+  GCC_64_BRANCH: ""
+  GCC_32_SOURCE: ""
+  GCC_32_BRANCH: ""
+
+  DEFCONFIG_SOURCE: ""
+  DEFCONFIG_NAME: "merlin_defconfig"
+  DEFCONFIG_ORIGIN_IMAGE: ""
+  DEFCONFIG_FROM_BOOT: false
+
+  KERNELSU_SOURCE: ""
+  KERNELSU_BRANCH: ""
+  KERNELSU_AUTO_GET: "true"
+  KERNELSU_AUTO_FORK: "bakasu"
+  KERNELSU_METHOD: "shell"
+
+  SUSFS_ENABLE: "true"
+  SUSFS_FIXED: "true"
+
+  AK3_SOURCE: "https://github.com/osm0sis/AnyKernel3.git"
+  AK3_BRANCH: "master"
+  BOOT_SOURCE: ""
+  NEED_DTBO: false
+  NEED_SAFE_DTBO: false
+  PACK_METHOD: "AnyKernel3"
+  PACK_KMODULES: "false"
+  ROM_TEXT: "merlin_miui13_stock"
+  PYTHON_VERSION: "3"
+
+  PATCHES_SOURCE: "JackA1ltman/NonGKI_Kernel_Patches"
+  PATCHES_BRANCH: "mi_kernel"
+  SUSFS_FOLDER_FIXED: ""
+  SUSFS_PATCH_FIXED: ""
+
+  REKERNEL_ENABLE: "false"
+  DROIDSPACES_ENABLE: "false"
+  NOMOUNT_ENABLE: "false"
+  HOOK_METHOD: "syscall"
+  KPM_ENABLE: "false"
+  KPM_INLINE: "false"
+  KPM_KPATCH_NEXT: "false"
+  KPM_PATCH_SOURCE: ""
+  BASEBAND_GUARD_ENABLE: "false"
+  BASEBAND_GUARD_BOOT: "false"
+  GENERATE_DTB: "false"
+  GENERATE_CHIP: "mediatek"
+  BUILD_DEBUGGER: "true"
+  SKIP_PATCH: "true"
+  BUILD_OTHER_CONFIG: "false"
+  MERGE_CONFIG_FILES: ""
+  FREE_MORE_SPACE: "false"
+
+jobs:
+  build-kernel:
+    name: Redmi Note 9 (merlin) MIUI A12
+    runs-on: ubuntu-24.04
+    env:
+      CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
+      CCACHE_NOHASHDIR: "true"
+      CCACHE_HARDLINK: "true"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Compilation environment preparation
+        uses: ./.github/workflows/build-env
+
+      - name: Get necessary tools
+        uses: ./.github/workflows/build-ready
+
+      - name: Patch Kernel of SUSFS
+        uses: ./.github/workflows/patch-susfs
+
+      - name: Patch for no-kprobe
+        uses: ./.github/workflows/patch-no-kprobe
+
+      - name: Extra Kernel Options (iter-2 build fixes)
+        run: |
+          cd $GITHUB_WORKSPACE/device_kernel
+          DC=arch/arm64/configs/merlin_defconfig
+
+          echo "[+] keep SUS_MAP off (old show_smap(...,is_pid) signature on 4.14 MTK)"
+          sed -i '/^CONFIG_KSU_SUSFS_SUS_MAP=y/d' "$DC" || true
+          echo "# CONFIG_KSU_SUSFS_SUS_MAP is not set" >> "$DC"
+
+          echo "[+] Error1: add susfs_def.h include to task_mmu.c (SUSFS include hunk rejected on merlin)"
+          if ! grep -q 'linux/susfs_def.h' fs/proc/task_mmu.c; then
+            sed -i '/#include <linux\/mm_inline.h>/a #if defined(CONFIG_KSU_SUSFS_SUS_KSTAT) || defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)\n#include <linux/susfs_def.h>\n#endif' fs/proc/task_mmu.c
+          fi
+          grep -n 'susfs_def.h' fs/proc/task_mmu.c || echo "[!] susfs_def.h include NOT added"
+
+          echo "[+] Error3: disable SUS_PATH (bakasu uses CMD_SUSFS_SET_SUS_PATH_UID_FILTER absent in SUSFS 2.2.00)"
+          sed -i '/^CONFIG_KSU_SUSFS_SUS_PATH=y/d' "$DC" || true
+          echo "# CONFIG_KSU_SUSFS_SUS_PATH is not set" >> "$DC"
+
+          echo "[+] Error2+: downgrade clang -Werror nits in GCC-era MTK drivers (benign; code ships on devices)."
+          echo "KCFLAGS=-Wno-error -Wno-strict-prototypes -Wno-error=implicit-int -Wno-error=implicit-function-declaration" >> $GITHUB_ENV
+          echo "[+] ...and strip bare -Werror from DRIVER-AREA Makefiles (MTK subdir-ccflags-y -Werror overrides the global KCFLAGS). NOT ./Makefile/scripts/arch (that broke prepare-compiler-check). -Werror=foo preserved."
+          for d in drivers sound net crypto; do
+            find "$d" -type f \( -name 'Makefile' -o -name 'Kbuild' -o -name '*.mk' \) -print0 2>/dev/null \
+              | xargs -0 -r sed -i -e 's/-Werror=/__WE__=/g' -e 's/-Werror//g' -e 's/__WE__=/-Werror=/g'
+          done
+
+          echo "[+] Link: allow duplicate symbols (MTK VCU driver defines mtk_vcu_*/vcu_* in both mtk_vcu.c and mtk_vcodec_mem.c; GNU ld tolerated it, ld.lld does not — take the first def)"
+          printf '\nLDFLAGS += --allow-multiple-definition\nKBUILD_LDFLAGS += --allow-multiple-definition\nLDFLAGS_vmlinux += --allow-multiple-definition\n' >> Makefile
+
+          echo "[+] Link: un-static selinux inode_doinit_with_dentry (SUSFS/KSU references it to reinit SELinux ctx on spoofed inodes; static -> undefined symbol at link)"
+          sed -i 's/static int inode_doinit_with_dentry(/int inode_doinit_with_dentry(/g' security/selinux/hooks.c
+          grep -n 'int inode_doinit_with_dentry(' security/selinux/hooks.c | head -2 || true
+
+          echo "[+] ksu_handle_stat flag -> flags (4.14 fs/stat.c, harmless if absent)"
+          sed -i 's/ksu_handle_stat(&dfd, &fname, &flag);/ksu_handle_stat(\&dfd, \&fname, \&flags);/' fs/stat.c || true
+
+          echo "[+] GB SPOOF: hand-port omni_clock_offset (all 6 pieces, layout-agnostic via content discovery)"
+          if python3 $GITHUB_WORKSPACE/apply_merlin_clock_offset.py; then
+            echo "CONFIG_KSU_SUSFS_CLOCK_OFFSET=y" >> arch/arm64/configs/merlin_defconfig
+            echo "[+] CLOCK_OFFSET enabled (GB uptime spoof ACTIVE)"
+          else
+            echo "[!] hand-port incomplete -> NOT enabling (stays baseline)"
+          fi
+
+      - name: Patch Kernel of Re:Kernel
+        uses: ./.github/workflows/patch-rekernel
+
+      - name: Patch Kernel of Droidspaces
+        uses: ./.github/workflows/patch-droidspaces
+
+      - name: Patch Kernel of Baseband Guard
+        uses: ./.github/workflows/patch-baseband-guard
+
+      - name: Patch Kernel of NoMount
+        uses: ./.github/workflows/patch-nomount
+
+      - name: Build Process
+        uses: ./.github/workflows/build-process
+
+      - name: Pack Process
+        uses: ./.github/workflows/pack-process
+
+      - name: Upload Artifacts
+        uses: ./.github/workflows/upload-files
